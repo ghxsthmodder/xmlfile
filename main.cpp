@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <algorithm>
+#include <sstream>
 #include <getopt.h>
 #include "pugixml.hpp"
 
@@ -40,7 +41,7 @@ void print_help() {
               << "  -c, --remove-comments       Remover comentários XML\n"
               << "  -s, --short-tags            Usar tags curtas para elementos vazios (padrão: true)\n"
               << "  -t, --remove-blank-texts    Remover textos em branco entre tags\n"
-              << "  -l, --remove-empty-lines    Remover linhas vazias (implícito na formatação)\n"
+              << "  -l, --remove-empty-lines    Remover linhas vazias\n"
               << "  -e, --encoding <enc>        Codificação de saída (padrão: UTF-8)\n"
               << "  -u, --include-extensions    Extensões extras separadas por vírgula (ex: i3d,gltf)\n"
               << "  -x, --non-xml-declaration   Não incluir declaração XML\n"
@@ -58,7 +59,7 @@ pugi::xml_encoding get_pugi_encoding(const std::string& enc) {
     return pugi::encoding_utf8;
 }
 
-void format_xml(const fs::path& path, const Config& config) {
+bool format_xml(const fs::path& path, const Config& config) {
     pugi::xml_document doc;
     unsigned int load_flags = pugi::parse_default;
     
@@ -69,7 +70,7 @@ void format_xml(const fs::path& path, const Config& config) {
     pugi::xml_parse_result result = doc.load_file(path.c_str(), load_flags);
     if (!result) {
         std::cerr << "Erro ao carregar " << path << ": " << result.description() << std::endl;
-        return;
+        return false;
     }
 
     if (config.removeBlankTexts) {
@@ -101,6 +102,19 @@ void format_xml(const fs::path& path, const Config& config) {
         for (auto& n : retriever.nodes) n.parent().remove_child(n);
     }
 
+    if (!config.noXmlDeclaration) {
+        pugi::xml_node decl = doc.child("xml");
+        if (decl && decl.type() == pugi::node_declaration) {
+            if (!decl.attribute("encoding")) {
+                decl.append_attribute("encoding") = config.encoding.c_str();
+            }
+        } else {
+            decl = doc.prepend_child(pugi::node_declaration);
+            decl.append_attribute("version") = "1.0";
+            decl.append_attribute("encoding") = config.encoding.c_str();
+        }
+    }
+
     if (config.standalone && !config.noXmlDeclaration) {
         pugi::xml_node decl = doc.child("xml");
         if (!decl || decl.type() != pugi::node_declaration) {
@@ -122,10 +136,31 @@ void format_xml(const fs::path& path, const Config& config) {
     std::string indent_str(config.indent, ' ');
     pugi::xml_encoding enc = get_pugi_encoding(config.encoding);
 
-    if (doc.save_file(path.c_str(), indent_str.c_str(), save_flags, enc)) {
+    std::stringstream ss;
+    doc.save(ss, indent_str.c_str(), save_flags, enc);
+    std::string output = ss.str();
+
+    if (config.removeEmptyLines) {
+        std::string cleaned;
+        std::istringstream stream(output);
+        std::string line;
+        while (std::getline(stream, line)) {
+            if (line.find_first_not_of(" \t\r") != std::string::npos) {
+                cleaned += line + "\n";
+            }
+        }
+        output = cleaned;
+    }
+
+    std::ofstream ofs(path, std::ios::binary);
+    if (ofs) {
+        ofs << output;
+        ofs.close();
         std::cout << "Formatado com sucesso: " << path << std::endl;
+        return true;
     } else {
         std::cerr << "Erro ao salvar: " << path << std::endl;
+        return false;
     }
 }
 
@@ -216,8 +251,8 @@ int main(int argc, char* argv[]) {
     }
 
     if (!config.inputFile.empty()) {
-        format_xml(config.inputFile, config);
-    } else if (config.batchMode && !config.directory.empty()) {
+        if (!format_xml(config.inputFile, config)) return 1;
+    } else if (!config.directory.empty()) {
         process_directory(config.directory, config);
     } else {
         print_help();
