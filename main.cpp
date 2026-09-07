@@ -284,11 +284,8 @@ int main(int argc, char* argv[]) {
 
     if (!config.inputFile.empty()) {
         format_xml(config.inputFile, config);
-    } else if (!config.directory.empty() && config.batchMode) {
-        process_directory(config.directory, config);
     } else if (!config.directory.empty()) {
-        std::cerr << "Erro: -d requer -b (modo batch)" << std::endl;
-        return 1;
+        process_directory(config.directory, config);
     } else {
         print_help();
     }
