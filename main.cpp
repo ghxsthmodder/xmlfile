@@ -220,17 +220,24 @@ int main(int argc, char* argv[]) {
 
     int opt;
     while ((opt = getopt_long(argc, argv, "f:bd:ri:cstle:u:xavh", long_options, nullptr)) != -1) {
+        auto require_arg = [&](const char* opt_name) -> std::string {
+            if (!optarg || optarg[0] == '\0') {
+                std::cerr << "Erro: " << opt_name << " requer um argumento" << std::endl;
+                std::exit(1);
+            }
+            if (optarg[0] == '-') {
+                std::cerr << "Erro: " << opt_name << " requer um argumento (recebido: '" << optarg << "')" << std::endl;
+                std::exit(1);
+            }
+            return std::string(optarg);
+        };
         switch (opt) {
-            case 'f': config.inputFile = optarg; break;
+            case 'f': config.inputFile = require_arg("-f"); break;
             case 'b': config.batchMode = true; break;
-            case 'd': config.directory = optarg; break;
+            case 'd': config.directory = require_arg("-d"); break;
             case 'r': config.recursive = true; break;
             case 'i': {
-                const std::string& s = optarg;
-                if (s.empty()) {
-                    std::cerr << "Erro: -i requer um número inteiro" << std::endl;
-                    return 1;
-                }
+                const std::string s = require_arg("-i");
                 int value = 0;
                 try {
                     size_t pos = 0;
@@ -251,9 +258,9 @@ int main(int argc, char* argv[]) {
             case 's': config.shortTags = !config.shortTags; break;
             case 't': config.removeBlankTexts = true; break;
             case 'l': config.removeEmptyLines = true; break;
-            case 'e': config.encoding = optarg; break;
+            case 'e': config.encoding = require_arg("-e"); break;
             case 'u': {
-                std::string exts = optarg;
+                std::string exts = require_arg("-u");
                 size_t pos = 0;
                 auto add_ext = [&](std::string e) {
                     if (e.empty()) return;
@@ -277,8 +284,11 @@ int main(int argc, char* argv[]) {
 
     if (!config.inputFile.empty()) {
         format_xml(config.inputFile, config);
-    } else if (config.batchMode && !config.directory.empty()) {
+    } else if (!config.directory.empty() && config.batchMode) {
         process_directory(config.directory, config);
+    } else if (!config.directory.empty()) {
+        std::cerr << "Erro: -d requer -b (modo batch)" << std::endl;
+        return 1;
     } else {
         print_help();
     }
