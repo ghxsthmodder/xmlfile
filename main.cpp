@@ -59,9 +59,14 @@ pugi::xml_encoding get_pugi_encoding(const std::string& enc) {
 }
 
 void format_xml(const fs::path& path, const Config& config) {
+    if (fs::is_directory(path)) {
+        std::cerr << "Erro: '" << path << "' é um diretório; use -d para processar diretórios" << std::endl;
+        return;
+    }
+
     pugi::xml_document doc;
     unsigned int load_flags = pugi::parse_default;
-    
+
     if (config.removeBlankTexts) {
         load_flags |= pugi::parse_ws_pcdata;
     }
@@ -74,19 +79,27 @@ void format_xml(const fs::path& path, const Config& config) {
 
     if (config.removeBlankTexts) {
         struct blank_remover : pugi::xml_tree_walker {
-            std::vector<pugi::xml_node> nodes;
+            std::vector<std::pair<pugi::xml_node, bool>> nodes;
             virtual bool for_each(pugi::xml_node& node) override {
                 if (node.type() == pugi::node_pcdata) {
                     std::string text = node.value();
                     if (text.find_first_not_of(" \t\n\r") == std::string::npos) {
-                        nodes.push_back(node);
+                        bool between_elements = node.previous_sibling().type() == pugi::node_element
+                                             && node.next_sibling().type() == pugi::node_element;
+                        nodes.emplace_back(node, between_elements);
                     }
                 }
                 return true;
             }
         } remover;
         doc.traverse(remover);
-        for (auto& n : remover.nodes) n.parent().remove_child(n);
+        for (auto& entry : remover.nodes) {
+            pugi::xml_node n = entry.first;
+            if (entry.second) {
+                n.parent().insert_child_after(pugi::node_pcdata, n).set_value(" ");
+            }
+            n.parent().remove_child(n);
+        }
     }
 
     if (config.removeComments) {
@@ -101,12 +114,18 @@ void format_xml(const fs::path& path, const Config& config) {
         for (auto& n : retriever.nodes) n.parent().remove_child(n);
     }
 
+    if (config.standalone && config.noXmlDeclaration) {
+        std::cerr << "Aviso: -a (standalone) ignorado porque -x remove a declaração XML" << std::endl;
+    }
+
     if (config.standalone && !config.noXmlDeclaration) {
         pugi::xml_node decl = doc.child("xml");
+        std::string lower_enc = config.encoding;
+        std::transform(lower_enc.begin(), lower_enc.end(), lower_enc.begin(), ::tolower);
         if (!decl || decl.type() != pugi::node_declaration) {
             decl = doc.prepend_child(pugi::node_declaration);
             decl.append_attribute("version") = "1.0";
-            decl.append_attribute("encoding") = config.encoding.c_str();
+            decl.append_attribute("encoding") = lower_enc.c_str();
         }
         if (!decl.attribute("standalone")) {
             decl.append_attribute("standalone") = "yes";
@@ -123,6 +142,26 @@ void format_xml(const fs::path& path, const Config& config) {
     pugi::xml_encoding enc = get_pugi_encoding(config.encoding);
 
     if (doc.save_file(path.c_str(), indent_str.c_str(), save_flags, enc)) {
+        if (config.removeEmptyLines) {
+            std::ifstream in(path);
+            std::string content((std::istreambuf_iterator<char>(in)),
+                                std::istreambuf_iterator<char>());
+            std::string out;
+            out.reserve(content.size());
+            bool prev_newline = false;
+            for (size_t i = 0; i < content.size(); ++i) {
+                char c = content[i];
+                if (c == '\n') {
+                    if (!prev_newline) out.push_back(c);
+                    prev_newline = true;
+                } else {
+                    out.push_back(c);
+                    prev_newline = false;
+                }
+            }
+            std::ofstream of(path);
+            of << out;
+        }
         std::cout << "Formatado com sucesso: " << path << std::endl;
     } else {
         std::cerr << "Erro ao salvar: " << path << std::endl;
@@ -148,11 +187,11 @@ void process_directory(const fs::path& dir, const Config& config) {
     };
 
     if (config.recursive) {
-        for (const auto& entry : fs::recursive_directory_iterator(dir)) {
+        for (const auto& entry : fs::recursive_directory_iterator(dir, fs::directory_options::none)) {
             process_entry(entry);
         }
     } else {
-        for (const auto& entry : fs::directory_iterator(dir)) {
+        for (const auto& entry : fs::directory_iterator(dir, fs::directory_options::none)) {
             process_entry(entry);
         }
     }
@@ -186,7 +225,28 @@ int main(int argc, char* argv[]) {
             case 'b': config.batchMode = true; break;
             case 'd': config.directory = optarg; break;
             case 'r': config.recursive = true; break;
-            case 'i': config.indent = std::stoi(optarg); break;
+            case 'i': {
+                const std::string& s = optarg;
+                if (s.empty()) {
+                    std::cerr << "Erro: -i requer um número inteiro" << std::endl;
+                    return 1;
+                }
+                int value = 0;
+                try {
+                    size_t pos = 0;
+                    value = std::stoi(s, &pos);
+                    if (pos != s.size()) throw std::invalid_argument("trailing chars");
+                } catch (const std::exception&) {
+                    std::cerr << "Erro: -i requer um número inteiro (recebido: '" << s << "')" << std::endl;
+                    return 1;
+                }
+                if (value < 0 || value > 16) {
+                    std::cerr << "Erro: -i deve estar entre 0 e 16 (recebido: " << value << ")" << std::endl;
+                    return 1;
+                }
+                config.indent = value;
+                break;
+            }
             case 'c': config.removeComments = true; break;
             case 's': config.shortTags = !config.shortTags; break;
             case 't': config.removeBlankTexts = true; break;
@@ -195,16 +255,16 @@ int main(int argc, char* argv[]) {
             case 'u': {
                 std::string exts = optarg;
                 size_t pos = 0;
-                while ((pos = exts.find(',')) != std::string::npos) {
-                    std::string e = exts.substr(0, pos);
+                auto add_ext = [&](std::string e) {
+                    if (e.empty()) return;
                     if (e[0] != '.') e = "." + e;
                     config.extensions.push_back(e);
+                };
+                while ((pos = exts.find(',')) != std::string::npos) {
+                    add_ext(exts.substr(0, pos));
                     exts.erase(0, pos + 1);
                 }
-                if (!exts.empty()) {
-                    if (exts[0] != '.') exts = "." + exts;
-                    config.extensions.push_back(exts);
-                }
+                add_ext(exts);
                 break;
             }
             case 'x': config.noXmlDeclaration = true; break;
